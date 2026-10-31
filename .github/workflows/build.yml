@@ -1,1 +1,617 @@
-.github/workflows/build.yml
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files
+        run: |
+          true
+          cat > settings.gradle.kts <<'EOF_0'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "CaseAutoClicker"
+          include(":app")
+          EOF_0
+          true
+          cat > build.gradle.kts <<'EOF_1'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_1
+          true
+          cat > gradle.properties <<'EOF_2'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF_2
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_3'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.casesim.autoclicker"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.casesim.autoclicker"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildTypes {
+                  release { isMinifyEnabled = false }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF_3
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+                  android:allowBackup="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ClickerService"
+                      android:exported="false"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_4
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'EOF_5'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:notificationTimeout="100"
+              android:description="@string/service_desc" />
+          EOF_5
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'EOF_6'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Case Simulator Auto Clicker</string>
+              <string name="service_desc">Дозволяє автоклікеру виконувати натискання на екрані у вказаній вами точці (наприклад, на кнопці відкриття кейса). Програма не читає й не збирає ваші дані.</string>
+          </resources>
+          EOF_6
+          mkdir -p app/src/main/java/com/casesim/autoclicker
+          cat > app/src/main/java/com/casesim/autoclicker/Prefs.kt <<'EOF_7'
+          package com.casesim.autoclicker
+
+          import android.content.Context
+
+          class Prefs(ctx: Context) {
+              private val sp = ctx.applicationContext.getSharedPreferences("clicker", Context.MODE_PRIVATE)
+
+              var interval: Long
+                  get() = sp.getLong("interval", 250L)
+                  set(v) { sp.edit().putLong("interval", v).apply() }
+
+              var limit: Int
+                  get() = sp.getInt("limit", 100)
+                  set(v) { sp.edit().putInt("limit", v).apply() }
+
+              var total: Long
+                  get() = sp.getLong("total", 0L)
+                  set(v) { sp.edit().putLong("total", v).apply() }
+
+              var targetX: Int
+                  get() = sp.getInt("targetX", -1)
+                  set(v) { sp.edit().putInt("targetX", v).apply() }
+
+              var targetY: Int
+                  get() = sp.getInt("targetY", -1)
+                  set(v) { sp.edit().putInt("targetY", v).apply() }
+
+              var panelX: Int
+                  get() = sp.getInt("panelX", 20)
+                  set(v) { sp.edit().putInt("panelX", v).apply() }
+
+              var panelY: Int
+                  get() = sp.getInt("panelY", 300)
+                  set(v) { sp.edit().putInt("panelY", v).apply() }
+          }
+          EOF_7
+          mkdir -p app/src/main/java/com/casesim/autoclicker
+          cat > app/src/main/java/com/casesim/autoclicker/ClickerService.kt <<'EOF_8'
+          package com.casesim.autoclicker
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Color
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class ClickerService : AccessibilityService() {
+
+              enum class State { STOPPED, RUNNING, PAUSED }
+
+              companion object {
+                  var instance: ClickerService? = null
+                  var listener: (() -> Unit)? = null
+              }
+
+              var state = State.STOPPED
+                  private set
+              var session = 0
+                  private set
+
+              private lateinit var prefs: Prefs
+              private lateinit var wm: WindowManager
+              private val handler = Handler(Looper.getMainLooper())
+              private var gen = 0
+
+              private var panel: LinearLayout? = null
+              private var panelParams: WindowManager.LayoutParams? = null
+              private var target: TextView? = null
+              private var targetParams: WindowManager.LayoutParams? = null
+              private var counterView: TextView? = null
+              private var toggleView: TextView? = null
+
+              val overlayShown: Boolean get() = panel != null
+
+              private val red = Color.parseColor("#E53935")
+              private val dark = Color.parseColor("#E6121212")
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+                  prefs = Prefs(this)
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  notifyUi()
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+
+              override fun onUnbind(intent: android.content.Intent?): Boolean {
+                  hideOverlay()
+                  instance = null
+                  notifyUi()
+                  return super.onUnbind(intent)
+              }
+
+              override fun onDestroy() {
+                  hideOverlay()
+                  instance = null
+                  super.onDestroy()
+              }
+
+              fun start() {
+                  if (!overlayShown) { showOverlay(); return }
+                  if (state == State.RUNNING) return
+                  if (state == State.STOPPED) session = 0
+                  state = State.RUNNING
+                  gen++
+                  setTargetTouchable(false)
+                  notifyUi()
+                  val g = gen
+                  handler.postDelayed({ tap(g) }, 300)
+              }
+
+              fun pause() {
+                  if (state != State.RUNNING) return
+                  state = State.PAUSED
+                  gen++
+                  handler.removeCallbacksAndMessages(null)
+                  setTargetTouchable(true)
+                  notifyUi()
+              }
+
+              fun stop() {
+                  state = State.STOPPED
+                  gen++
+                  session = 0
+                  handler.removeCallbacksAndMessages(null)
+                  setTargetTouchable(true)
+                  notifyUi()
+              }
+
+              fun toggle() {
+                  if (state == State.RUNNING) pause() else start()
+              }
+
+              private fun tap(g: Int) {
+                  if (g != gen || state != State.RUNNING) return
+                  val t = target ?: return
+                  val loc = IntArray(2)
+                  t.getLocationOnScreen(loc)
+                  val cx = loc[0] + t.width / 2f
+                  val cy = loc[1] + t.height / 2f
+
+                  val path = Path().apply { moveTo(cx, cy) }
+                  val stroke = GestureDescription.StrokeDescription(path, 0, 30)
+                  val gesture = GestureDescription.Builder().addStroke(stroke).build()
+                  val cb = object : GestureResultCallback() {
+                      override fun onCompleted(d: GestureDescription?) = afterTap(g, true)
+                      override fun onCancelled(d: GestureDescription?) = afterTap(g, false)
+                  }
+                  if (!dispatchGesture(gesture, cb, null)) afterTap(g, false)
+              }
+
+              private fun afterTap(g: Int, ok: Boolean) {
+                  if (g != gen || state != State.RUNNING) return
+                  if (ok) {
+                      session++
+                      prefs.total = prefs.total + 1
+                      notifyUi()
+                  }
+                  val limit = prefs.limit
+                  if (limit > 0 && session >= limit) { stop(); return }
+                  handler.postDelayed({ tap(g) }, prefs.interval)
+              }
+
+              private fun overlayParams(w: Int, h: Int) = WindowManager.LayoutParams(
+                  w, h,
+                  WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                      WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                      WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                  PixelFormat.TRANSLUCENT
+              ).apply { gravity = Gravity.TOP or Gravity.START }
+
+              private fun roundBg(color: Int, radius: Int, stroke: Boolean = false) =
+                  GradientDrawable().apply {
+                      setColor(color)
+                      cornerRadius = dp(radius).toFloat()
+                      if (stroke) setStroke(dp(2), red)
+                  }
+
+              private fun panelButton(label: String, bg: Int, onClick: () -> Unit) = TextView(this).apply {
+                  text = label
+                  textSize = 20f
+                  gravity = Gravity.CENTER
+                  setTextColor(Color.WHITE)
+                  background = roundBg(bg, 10)
+                  setPadding(dp(12), dp(8), dp(12), dp(8))
+                  setOnClickListener { onClick() }
+                  layoutParams = LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                  ).apply { setMargins(dp(3), 0, dp(3), 0) }
+              }
+
+              fun showOverlay() {
+                  if (panel != null) return
+                  val dm = resources.displayMetrics
+
+                  val size = dp(56)
+                  val t = TextView(this).apply {
+                      text = "◎"
+                      textSize = 26f
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.WHITE)
+                      background = GradientDrawable().apply {
+                          shape = GradientDrawable.OVAL
+                          setColor(Color.argb(110, 229, 57, 53))
+                          setStroke(dp(3), red)
+                      }
+                  }
+                  val tp = overlayParams(size, size).apply {
+                      x = if (prefs.targetX >= 0) prefs.targetX else dm.widthPixels / 2 - size / 2
+                      y = if (prefs.targetY >= 0) prefs.targetY else dm.heightPixels / 2 - size / 2
+                  }
+                  wm.addView(t, tp)
+                  attachDrag(t, t, tp) { prefs.targetX = tp.x; prefs.targetY = tp.y }
+                  target = t
+                  targetParams = tp
+
+                  val counter = TextView(this).apply {
+                      setTextColor(Color.WHITE)
+                      textSize = 14f
+                      gravity = Gravity.CENTER
+                      setPadding(dp(10), dp(8), dp(10), dp(8))
+                  }
+                  val toggle = panelButton("▶", red) { toggle() }
+                  val stopBtn = panelButton("⏹", Color.parseColor("#444444")) { stop() }
+                  val closeBtn = panelButton("✕", Color.parseColor("#444444")) { hideOverlay() }
+
+                  val p = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      background = roundBg(dark, 14, stroke = true)
+                      setPadding(dp(4), dp(4), dp(4), dp(4))
+                      addView(counter)
+                      addView(toggle)
+                      addView(stopBtn)
+                      addView(closeBtn)
+                  }
+                  val pp = overlayParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT
+                  ).apply { x = prefs.panelX; y = prefs.panelY }
+                  wm.addView(p, pp)
+                  attachDrag(counter, p, pp) { prefs.panelX = pp.x; prefs.panelY = pp.y }
+
+                  panel = p
+                  panelParams = pp
+                  counterView = counter
+                  toggleView = toggle
+                  notifyUi()
+              }
+
+              fun hideOverlay() {
+                  if (state != State.STOPPED) stop()
+                  try { panel?.let { wm.removeView(it) } } catch (_: Exception) {}
+                  try { target?.let { wm.removeView(it) } } catch (_: Exception) {}
+                  panel = null; target = null; panelParams = null; targetParams = null
+                  counterView = null; toggleView = null
+                  notifyUi()
+              }
+
+              private fun setTargetTouchable(touchable: Boolean) {
+                  val t = target ?: return
+                  val tp = targetParams ?: return
+                  tp.flags = if (touchable)
+                      tp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                  else
+                      tp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                  try { wm.updateViewLayout(t, tp) } catch (_: Exception) {}
+              }
+
+              private fun attachDrag(
+                  touchView: View, root: View, params: WindowManager.LayoutParams, onEnd: () -> Unit
+              ) {
+                  var sx = 0f; var sy = 0f; var ox = 0; var oy = 0
+                  touchView.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; ox = params.x; oy = params.y; true }
+                          MotionEvent.ACTION_MOVE -> {
+                              params.x = ox + (e.rawX - sx).toInt()
+                              params.y = oy + (e.rawY - sy).toInt()
+                              try { wm.updateViewLayout(root, params) } catch (_: Exception) {}
+                              true
+                          }
+                          MotionEvent.ACTION_UP -> { onEnd(); true }
+                          else -> false
+                      }
+                  }
+              }
+
+              private fun notifyUi() {
+                  val lim = if (::prefs.isInitialized && prefs.limit > 0) prefs.limit.toString() else "∞"
+                  counterView?.text = "$session/$lim"
+                  toggleView?.text = if (state == State.RUNNING) "⏸" else "▶"
+                  listener?.invoke()
+              }
+          }
+          EOF_8
+          mkdir -p app/src/main/java/com/casesim/autoclicker
+          cat > app/src/main/java/com/casesim/autoclicker/MainActivity.kt <<'EOF_9'
+          package com.casesim.autoclicker
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              private lateinit var prefs: Prefs
+              private lateinit var status: TextView
+              private lateinit var counter: TextView
+
+              private val red = Color.parseColor("#E53935")
+              private val bg = Color.parseColor("#121212")
+              private val card = Color.parseColor("#2A2A2A")
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun btn(text: String, color: Int = red, onClick: () -> Unit) = Button(this).apply {
+                  this.text = text
+                  setTextColor(Color.WHITE)
+                  isAllCaps = false
+                  minWidth = 0
+                  minimumWidth = 0
+                  background = GradientDrawable().apply { setColor(color); cornerRadius = dp(10).toFloat() }
+                  setOnClickListener { onClick() }
+              }
+
+              private fun label(text: String, size: Float = 15f, color: Int = Color.WHITE) = TextView(this).apply {
+                  this.text = text
+                  textSize = size
+                  setTextColor(color)
+                  setPadding(0, dp(14), 0, dp(6))
+              }
+
+              private fun <T> group(opts: List<Pair<String, T>>, get: () -> T, set: (T) -> Unit): LinearLayout {
+                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  val buttons = mutableListOf<Button>()
+                  fun paint() {
+                      buttons.forEachIndexed { i, b ->
+                          (b.background as GradientDrawable).setColor(if (opts[i].second == get()) red else card)
+                      }
+                  }
+                  opts.forEach { (name, value) ->
+                      val b = btn(name, card) { set(value); paint() }
+                      b.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                          .apply { setMargins(dp(2), 0, dp(2), 0) }
+                      buttons.add(b)
+                      row.addView(b)
+                  }
+                  paint()
+                  return row
+              }
+
+              private fun svc(action: (ClickerService) -> Unit) {
+                  val s = ClickerService.instance
+                  if (s == null) {
+                      Toast.makeText(this, "Спершу увімкніть службу в налаштуваннях спеціальних можливостей", Toast.LENGTH_LONG).show()
+                  } else action(s)
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = Prefs(this)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(bg)
+                      setPadding(dp(16), dp(24), dp(16), dp(24))
+                  }
+
+                  root.addView(TextView(this).apply {
+                      text = "CASE SIMULATOR\nAUTO CLICKER"
+                      textSize = 26f
+                      setTextColor(red)
+                      typeface = android.graphics.Typeface.DEFAULT_BOLD
+                      gravity = Gravity.CENTER
+                  })
+
+                  status = label("", 15f)
+                  root.addView(status)
+                  root.addView(btn("1. Увімкнути службу (Спеціальні можливості)") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  })
+
+                  root.addView(label("Інтервал між натисканнями, мс"))
+                  root.addView(group(
+                      listOf("50" to 50L, "100" to 100L, "250" to 250L, "500" to 500L, "1000" to 1000L),
+                      { prefs.interval }, { prefs.interval = it }
+                  ))
+
+                  root.addView(label("Кількість натискань"))
+                  root.addView(group(
+                      listOf("100" to 100, "500" to 500, "1000" to 1000, "∞" to 0),
+                      { prefs.limit }, { prefs.limit = it; ClickerService.instance?.let { s -> ClickerService.listener?.invoke() } }
+                  ))
+
+                  root.addView(label("2. Панель поверх гри"))
+                  root.addView(btn("Показати панель і ◎ ціль") { svc { it.showOverlay() } })
+                  root.addView(btn("Сховати панель", card) { svc { it.hideOverlay() } }.apply {
+                      (layoutParams as? LinearLayout.LayoutParams)
+                  })
+
+                  root.addView(label("3. Керування"))
+                  val ctrl = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  fun add(b: Button) {
+                      b.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                          .apply { setMargins(dp(2), 0, dp(2), 0) }
+                      ctrl.addView(b)
+                  }
+                  add(btn("▶ Старт") { svc { it.start() } })
+                  add(btn("⏸ Пауза", card) { svc { it.pause() } })
+                  add(btn("⏹ Стоп", card) { svc { it.stop() } })
+                  root.addView(ctrl)
+
+                  counter = label("", 18f)
+                  root.addView(counter)
+                  root.addView(btn("Скинути загальний лічильник", card) { prefs.total = 0; refresh() })
+
+                  root.addView(label("Як користуватись", 16f, red))
+                  root.addView(label(
+                      "1) Увімкніть службу «Case Simulator Auto Clicker» у Спеціальних можливостях.\n" +
+                      "2) Натисніть «Показати панель і ◎ ціль».\n" +
+                      "3) Відкрийте гру й перетягніть червоне коло ◎ на кнопку відкриття кейса. Панель теж можна пересувати (тягніть за лічильник).\n" +
+                      "4) Натисніть ▶ на панелі. ⏸ — пауза, ⏹ — стоп, ✕ — сховати панель.\n" +
+                      "Клікер сам зупиниться, коли досягне вибраної кількості.",
+                      14f, Color.LTGRAY
+                  ))
+
+                  root.addView(label("Які дозволи потрібні", 16f, red))
+                  root.addView(label(
+                      "• Спеціальні можливості (Accessibility) — єдиний потрібний дозвіл. Саме він дає змогу програмі натискати на екран і показувати плаваючу панель поверх гри. Root не потрібен, інтернет не використовується, дані не збираються.\n" +
+                      "• Android 13+: якщо перемикач сірий (програма встановлена з APK) — відкрийте Налаштування → Програми → Case Simulator Auto Clicker → ⋮ → «Дозволити обмежені налаштування», потім увімкніть службу знову.\n" +
+                      "• Служба вимикається в тому ж меню в будь-який момент.",
+                      14f, Color.LTGRAY
+                  ))
+
+                  setContentView(ScrollView(this).apply {
+                      setBackgroundColor(bg)
+                      addView(root)
+                  })
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  ClickerService.listener = { runOnUiThread { refresh() } }
+                  refresh()
+              }
+
+              override fun onPause() {
+                  ClickerService.listener = null
+                  super.onPause()
+              }
+
+              private fun refresh() {
+                  val s = ClickerService.instance
+                  status.text = if (s == null) "⚠ Службу не увімкнено" else "✅ Служба активна"
+                  val state = when (s?.state) {
+                      ClickerService.State.RUNNING -> "працює"
+                      ClickerService.State.PAUSED -> "пауза"
+                      else -> "зупинено"
+                  }
+                  counter.text = "Усього натискань: ${prefs.total}\nУ цій сесії: ${s?.session ?: 0} · $state"
+              }
+          }
+          EOF_9
+      - run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CaseAutoClicker-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
